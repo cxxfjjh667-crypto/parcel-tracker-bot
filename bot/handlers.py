@@ -1,0 +1,697 @@
+"""
+Telegram Bot Handlers
+Commands, inline keyboards, and callback handlers
+"""
+import logging
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+from telegram.ext import (
+    Application, CommandHandler, CallbackQueryHandler,
+    MessageHandler, ConversationHandler, filters, ContextTypes,
+)
+
+import database as db
+from api.etrackings_client import ETrackingsClient
+from bot.messages import (
+    format_summary, format_tracking_status, format_parcel_list,
+    format_by_courier, format_carrier_anomaly, format_status_thai,
+)
+from tracker.scanner import Scanner
+from config import CARRIERS, CARRIER_PATTERNS, CARRIER_ALIASES, ANOMALY_MIN, ANOMALY_MAX
+
+logger = logging.getLogger(__name__)
+
+# Conversation states
+WAITING_TRACKING = 1
+WAITING_PRODUCT_NAME = 2
+WAITING_SEARCH = 3
+
+# Scanner instance
+scanner = Scanner()
+etrackings = ETrackingsClient()
+
+
+# ===== Menu Keyboard =====
+
+def get_main_menu() -> InlineKeyboardMarkup:
+    """Create the inline menu keyboard."""
+    keyboard = [
+        [
+            InlineKeyboardButton("📦 ดูสรุปรายรอบ", callback_data="summary"),
+            InlineKeyboardButton("📦 ของมาวันนี้", callback_data="today"),
+        ],
+        [
+            InlineKeyboardButton("📋 รายการทั้งหมด", callback_data="all_parcels"),
+            InlineKeyboardButton("📋 แยกขนส่ง", callback_data="by_courier"),
+        ],
+        [
+            InlineKeyboardButton("🔍 ค้นหา", callback_data="search"),
+            InlineKeyboardButton("➕ เพิ่มพัสดุ", callback_data="add"),
+        ],
+        [
+            InlineKeyboardButton("🔄 Scan ตอนนี้", callback_data="scan_now"),
+            InlineKeyboardButton("📋 เมนู", callback_data="menu"),
+        ],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def get_bottom_menu() -> ReplyKeyboardMarkup:
+    """Create the persistent bottom keyboard."""
+    keyboard = [
+        [KeyboardButton("📦 สรุป"), KeyboardButton("🚚 ของมาวันนี้"), KeyboardButton("📋 รายการ")],
+        [KeyboardButton("🔄 Scan"), KeyboardButton("📋 แยกขนส่ง"), KeyboardButton("📋 เมนู")],
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, is_persistent=True)
+
+
+# ===== Command Handlers =====
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /start command — show welcome + both menus."""
+    chat_id = update.effective_chat.id
+    logger.info(f"User started bot, chat_id: {chat_id}")
+
+    # Send bottom keyboard first
+    await update.message.reply_text(
+        "🤖 Order Tracker Bot พร้อมใช้งาน!\n"
+        f"📌 Chat ID: {chat_id}\n\n"
+        "กดปุ่มด้านล่างได้เลย ⬇️",
+        reply_markup=get_bottom_menu()
+    )
+
+
+async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /add <tracking_no> [ชื่อสินค้า] [ค่ายขนส่ง]"""
+    args = context.args
+
+    if not args:
+        await update.message.reply_text(
+            "📦 วิธีเพิ่มพัสดุ:\n"
+            "/add <เลขพัสดุ> [ชื่อสินค้า] [ค่ายขนส่ง]\n\n"
+            "ตัวอย่าง:\n"
+            "/add 820148026547\n"
+            "/add 820148026547 เสื้อยืดดำ\n"
+            "/add 793378072631 เสื้อสีเขียว J&T\n\n"
+            "ค่ายที่รองรับ: J&T, Flash, SPX, Kerry, Best, ThaiPost, DHL"
+        )
+        return
+
+    tracking_no = args[0].strip()
+    extra_args = args[1:] if len(args) > 1 else []
+
+    # Try to detect carrier from text (e.g. "J&T", "flash", "เจแอนด์ที")
+    courier_id = None
+    product_parts = []
+
+    for word in extra_args:
+        alias_match = detect_carrier_from_text(word)
+        if alias_match:
+            courier_id = alias_match
+        else:
+            product_parts.append(word)
+
+    product_name = " ".join(product_parts)
+
+    # If not found from text, try auto-detect from tracking number
+    if not courier_id:
+        courier_id = detect_carrier(tracking_no)
+
+    if not courier_id:
+        carriers_list = "J&T, Flash, SPX, Kerry, Best, ThaiPost, DHL"
+        await update.message.reply_text(
+            f"❌ ไม่สามารถตรวจจับค่ายขนส่งจากเลข {tracking_no}\n\n"
+            f"ลองระบุค่ายขนส่งด้วย เช่น:\n"
+            f"/add {tracking_no} เสื้อยืด J&T\n\n"
+            f"ค่ายที่รองรับ: {carriers_list}"
+        )
+        return
+
+    carrier_info = CARRIERS[courier_id]
+
+    # Add to database
+    success = db.add_parcel(
+        tracking_no=tracking_no,
+        courier=carrier_info["name"],
+        courier_key=carrier_info["key"],
+        product_name=product_name,
+    )
+
+    if success:
+        msg = (
+            f"✅ เพิ่มพัสดุสำเร็จ!\n"
+            f"📦 {tracking_no}\n"
+            f"🚛 {carrier_info['name']}\n"
+        )
+        if product_name:
+            msg += f"🏷️ {product_name}\n"
+
+        # Try to fetch initial status
+        result = etrackings.track(tracking_no, carrier_info["key"])
+        if result.get("success"):
+            status = etrackings.get_tracking_status(result)
+            event = etrackings.get_latest_event(result)
+            db.update_parcel_status(tracking_no, status, event)
+            msg += f"📋 สถานะ: {format_status_thai(status)}\n"
+            msg += f"📝 ล่าสุด: {event}"
+        else:
+            msg += "⏳ จะเช็คสถานะในรอบถัดไป"
+
+        await update.message.reply_text(msg)
+    else:
+        await update.message.reply_text(f"⚠️ พัสดุ {tracking_no} มีอยู่ในระบบแล้ว")
+
+
+async def cmd_addcarrier(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /addcarrier <carrier> <tracking_no> [product_name]"""
+    args = context.args
+
+    if len(args) < 2:
+        carriers_list = "\n".join(
+            f"  {k} = {v['name']}" for k, v in CARRIERS.items()
+        )
+        await update.message.reply_text(
+            "📦 วิธีใช้:\n"
+            "/addcarrier <ค่าย> <เลขพัสดุ> [ชื่อสินค้า]\n\n"
+            f"ค่ายที่รองรับ:\n{carriers_list}\n\n"
+            "ตัวอย่าง:\n"
+            "/addcarrier jt 820148026547 เสื้อยืด"
+        )
+        return
+
+    carrier_id = args[0].lower()
+    tracking_no = args[1].strip()
+    product_name = " ".join(args[2:]) if len(args) > 2 else ""
+
+    if carrier_id not in CARRIERS:
+        await update.message.reply_text(f"❌ ไม่รู้จักค่ายขนส่ง: {carrier_id}")
+        return
+
+    carrier_info = CARRIERS[carrier_id]
+    success = db.add_parcel(
+        tracking_no=tracking_no,
+        courier=carrier_info["name"],
+        courier_key=carrier_info["key"],
+        product_name=product_name,
+    )
+
+    if success:
+        await update.message.reply_text(
+            f"✅ เพิ่มพัสดุสำเร็จ!\n"
+            f"📦 {tracking_no}\n"
+            f"🚛 {carrier_info['name']}"
+        )
+    else:
+        await update.message.reply_text(f"⚠️ พัสดุ {tracking_no} มีอยู่ในระบบแล้ว")
+
+
+async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /remove <tracking_no>"""
+    if not context.args:
+        await update.message.reply_text("ใช้: /remove <เลขพัสดุ>")
+        return
+
+    tracking_no = context.args[0].strip()
+    if db.remove_parcel(tracking_no):
+        await update.message.reply_text(f"✅ ลบ {tracking_no} แล้ว")
+    else:
+        await update.message.reply_text(f"❌ ไม่พบ {tracking_no}")
+
+
+async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /status <tracking_no> — check single parcel status."""
+    if not context.args:
+        await update.message.reply_text("ใช้: /status <เลขพัสดุ>")
+        return
+
+    tracking_no = context.args[0].strip()
+    parcel = db.get_parcel(tracking_no)
+
+    if not parcel:
+        await update.message.reply_text(f"❌ ไม่พบ {tracking_no} ในระบบ")
+        return
+
+    # Fetch latest tracking data
+    result = etrackings.track(tracking_no, parcel["courier_key"])
+    staff = None
+    timelines = None
+
+    if result.get("success"):
+        status = etrackings.get_tracking_status(result)
+        event = etrackings.get_latest_event(result)
+        db.update_parcel_status(tracking_no, status, event)
+        parcel = db.get_parcel(tracking_no)  # Refresh
+
+        # Extract delivery staff and timelines
+        staff = etrackings.get_delivery_staff(result)
+        timelines = etrackings.get_tracking_timelines(result)
+
+    msg = format_tracking_status(parcel, result, staff=staff, timelines=timelines)
+    await update.message.reply_text(msg)
+
+
+async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /menu — show menu buttons."""
+    await update.message.reply_text(
+        "📋 เมนูหลัก",
+        reply_markup=get_main_menu()
+    )
+
+
+# ===== Callback Query Handlers =====
+
+def get_parcel_buttons(parcels: list) -> InlineKeyboardMarkup:
+    """Create per-parcel action buttons."""
+    keyboard = []
+    for p in parcels:
+        tn = p["tracking_no"]
+        name = p.get("product_name", "")
+        status_emoji = {
+            "ON_PICKED_UP": "📥", "ON_SHIPPING": "🚚",
+            "ON_DELIVERED": "✅", "UNKNOWN": "⏳",
+        }.get(p.get("status", "UNKNOWN"), "❓")
+
+        label = f"{status_emoji} {tn}"
+        if name:
+            label += f" | {name}"
+
+        # Row 1: parcel label (shows status)
+        keyboard.append([InlineKeyboardButton(label, callback_data=f"s:{tn}")])
+        # Row 2: action buttons
+        keyboard.append([
+            InlineKeyboardButton("📞 เช็คเบอร์", callback_data=f"p:{tn}"),
+            InlineKeyboardButton("📜 ประวัติ", callback_data=f"h:{tn}"),
+            InlineKeyboardButton("🗑 ลบ", callback_data=f"d:{tn}"),
+        ])
+
+    # Back to menu
+    keyboard.append([InlineKeyboardButton("🔙 กลับเมนูหลัก", callback_data="menu")])
+    return InlineKeyboardMarkup(keyboard)
+
+
+def get_back_buttons(tracking_no: str = None) -> InlineKeyboardMarkup:
+    """Back buttons after viewing detail."""
+    buttons = []
+    if tracking_no:
+        buttons.append([
+            InlineKeyboardButton("📞 เช็คเบอร์", callback_data=f"p:{tracking_no}"),
+            InlineKeyboardButton("📜 ประวัติ", callback_data=f"h:{tracking_no}"),
+        ])
+    buttons.append([
+        InlineKeyboardButton("📋 รายการทั้งหมด", callback_data="all_parcels"),
+        InlineKeyboardButton("🔙 เมนูหลัก", callback_data="menu"),
+    ])
+    return InlineKeyboardMarkup(buttons)
+
+
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle inline keyboard button presses."""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    # ===== Main Menu =====
+    if data == "menu":
+        await query.edit_message_text(
+            "📋 เมนูหลัก",
+            reply_markup=get_main_menu()
+        )
+
+    elif data == "summary":
+        stats = db.get_summary_stats()
+        scan_info = scanner.last_scan_info
+        msg = format_summary(stats, scan_info if scan_info else None)
+        await query.edit_message_text(msg, reply_markup=get_main_menu())
+
+    elif data == "all_parcels":
+        parcels = db.get_active_parcels()
+        if not parcels:
+            await query.edit_message_text(
+                "📭 ยังไม่มีพัสดุในระบบ\n\nเพิ่มพัสดุด้วย:\n/add <เลขพัสดุ> [ชื่อสินค้า] [ค่าย]",
+                reply_markup=get_main_menu()
+            )
+            return
+        msg = f"📋 รายการพัสดุ ({len(parcels)} ชิ้น)\nกดปุ่มด้านล่างได้เลย ⬇️"
+        await query.edit_message_text(msg, reply_markup=get_parcel_buttons(parcels))
+
+    elif data == "by_courier":
+        by_courier = db.get_parcels_by_courier()
+        msg = format_by_courier(by_courier)
+        await query.edit_message_text(msg, reply_markup=get_main_menu())
+
+    elif data == "search":
+        await query.edit_message_text(
+            "🔍 พิมพ์เลขพัสดุหรือชื่อสินค้าที่ต้องการค้นหา:\n"
+            "(พิมพ์ /search ตามด้วยคำค้นหา)\n\n"
+            "ตัวอย่าง: /search 82014",
+            reply_markup=get_main_menu()
+        )
+
+    elif data == "add":
+        await query.edit_message_text(
+            "➕ เพิ่มพัสดุ — พิมพ์คำสั่ง:\n"
+            "/add <เลขพัสดุ> [ชื่อสินค้า] [ค่ายขนส่ง]\n\n"
+            "ตัวอย่าง:\n"
+            "/add 820148026547 เสื้อยืดดำ\n"
+            "/add 793378072631 เสื้อ J&T",
+            reply_markup=get_main_menu()
+        )
+
+    elif data == "scan_now":
+        await query.edit_message_text("🔄 กำลัง Scan...")
+
+        chat_id = update.effective_chat.id
+
+        async def send_notification(msg):
+            await context.bot.send_message(chat_id=chat_id, text=msg)
+
+        scan_info = await scanner.scan_all(notify_callback=send_notification)
+
+        # Check anomalies
+        anomalies = scanner.check_anomalies()
+        if anomalies:
+            anomaly_msg = format_carrier_anomaly(anomalies, ANOMALY_MIN, ANOMALY_MAX)
+            await context.bot.send_message(chat_id=chat_id, text=anomaly_msg)
+
+        # Show updated summary
+        stats = db.get_summary_stats()
+        msg = format_summary(stats, scan_info)
+        await context.bot.send_message(
+            chat_id=chat_id, text=msg, reply_markup=get_main_menu()
+        )
+
+    # ===== ของมาวันนี้ =====
+    elif data == "today":
+        today_parcels = db.get_today_deliveries()
+        if not today_parcels:
+            await query.edit_message_text(
+                "📦 ของมาวันนี้\n\n"
+                "ยังไม่มีพัสดุที่กำลังจัดส่งวันนี้\n"
+                "💡 ลองกด 🔄 Scan ตอนนี้ เพื่ออัพเดทสถานะล่าสุด",
+                reply_markup=get_main_menu()
+            )
+            return
+
+        from datetime import date as date_mod
+        today_str = date_mod.today().strftime("%Y-%m-%d")
+        msg = (
+            f"📦 ของมาวันนี้ ({today_str})\n"
+            f"🚚 มีของกำลังจัดส่ง {len(today_parcels)} ชิ้น\n"
+            f"กดปุ่มด้านล่างเพื่อดูรายละเอียด ⬇️"
+        )
+        await query.edit_message_text(msg, reply_markup=get_parcel_buttons(today_parcels))
+
+    # ===== Per-Parcel: เช็คเบอร์ =====
+    elif data.startswith("p:"):
+        tracking_no = data[2:]
+        parcel = db.get_parcel(tracking_no)
+        if not parcel:
+            await query.edit_message_text(f"❌ ไม่พบ {tracking_no}",
+                                          reply_markup=get_main_menu())
+            return
+
+        result = etrackings.track(tracking_no, parcel["courier_key"])
+        staff = etrackings.get_delivery_staff(result) if result.get("success") else None
+
+        name = parcel.get("product_name", "")
+        lines = [
+            f"📞 ข้อมูลพนักงานส่ง",
+            f"📦 {tracking_no}",
+        ]
+        if name:
+            lines.append(f"🏷️ {name}")
+        lines.append("")
+
+        if staff:
+            if staff.get("name"):
+                lines.append(f"👤 พนักงาน: {staff['name']}")
+            if staff.get("phone"):
+                lines.append(f"📞 เบอร์: {staff['phone']}")
+            if staff.get("branch_phone"):
+                lines.append(f"🏢 เบอร์สาขา: {staff['branch_phone']}")
+        else:
+            lines.append("⏳ ยังไม่มีข้อมูลพนักงาน (รอสถานะ กำลังจัดส่ง)")
+
+        await query.edit_message_text(
+            "\n".join(lines),
+            reply_markup=get_back_buttons(tracking_no)
+        )
+
+    # ===== Per-Parcel: ดูประวัติ =====
+    elif data.startswith("h:"):
+        tracking_no = data[2:]
+        parcel = db.get_parcel(tracking_no)
+        if not parcel:
+            await query.edit_message_text(f"❌ ไม่พบ {tracking_no}",
+                                          reply_markup=get_main_menu())
+            return
+
+        result = etrackings.track(tracking_no, parcel["courier_key"])
+        timelines = etrackings.get_tracking_timelines(result) if result.get("success") else []
+
+        name = parcel.get("product_name", "")
+        lines = [
+            f"📜 ประวัติพัสดุ",
+            f"📦 {tracking_no}",
+        ]
+        if name:
+            lines.append(f"🏷️ {name}")
+        lines.append(f"📋 สถานะ: {format_status_thai(parcel.get('status', 'UNKNOWN'))}")
+        lines.append("")
+
+        if timelines:
+            for t in timelines[:8]:
+                lines.append(f"• {t['date']} {t['time']} - {t['description']}")
+        else:
+            lines.append("⏳ ยังไม่มีข้อมูลประวัติ")
+
+        await query.edit_message_text(
+            "\n".join(lines),
+            reply_markup=get_back_buttons(tracking_no)
+        )
+
+    # ===== Per-Parcel: สถานะ (กดที่ชื่อ) =====
+    elif data.startswith("s:"):
+        tracking_no = data[2:]
+        parcel = db.get_parcel(tracking_no)
+        if not parcel:
+            await query.edit_message_text(f"❌ ไม่พบ {tracking_no}",
+                                          reply_markup=get_main_menu())
+            return
+
+        result = etrackings.track(tracking_no, parcel["courier_key"])
+        staff = None
+        timelines = None
+        if result.get("success"):
+            status = etrackings.get_tracking_status(result)
+            event = etrackings.get_latest_event(result)
+            db.update_parcel_status(tracking_no, status, event)
+            parcel = db.get_parcel(tracking_no)
+            staff = etrackings.get_delivery_staff(result)
+            timelines = etrackings.get_tracking_timelines(result)
+
+        msg = format_tracking_status(parcel, result, staff=staff, timelines=timelines)
+        await query.edit_message_text(msg, reply_markup=get_back_buttons(tracking_no))
+
+    # ===== Per-Parcel: ลบ =====
+    elif data.startswith("d:"):
+        tracking_no = data[2:]
+        if db.remove_parcel(tracking_no):
+            await query.edit_message_text(
+                f"✅ ลบ {tracking_no} แล้ว",
+                reply_markup=get_main_menu()
+            )
+        else:
+            await query.edit_message_text(
+                f"❌ ไม่พบ {tracking_no}",
+                reply_markup=get_main_menu()
+            )
+
+
+async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /search <query>"""
+    if not context.args:
+        await update.message.reply_text("ใช้: /search <เลขพัสดุหรือชื่อสินค้า>")
+        return
+
+    query = " ".join(context.args)
+    results = db.search_parcels(query)
+    msg = format_parcel_list(results, f"ผลค้นหา '{query}'")
+    await update.message.reply_text(msg)
+
+
+# ===== Helpers =====
+
+def detect_carrier(tracking_no: str) -> str | None:
+    """Auto-detect carrier from tracking number prefix."""
+    tracking_upper = tracking_no.upper()
+
+    # Check longest prefixes first
+    for prefix in sorted(CARRIER_PATTERNS.keys(), key=len, reverse=True):
+        if tracking_upper.startswith(prefix):
+            return CARRIER_PATTERNS[prefix]
+
+    return None
+
+
+def detect_carrier_from_text(text: str) -> str | None:
+    """Detect carrier from user-typed text like 'J&T', 'flash', 'เจแอนด์ที'."""
+    text_lower = text.lower().strip()
+    return CARRIER_ALIASES.get(text_lower)
+
+
+# ===== Scheduler Job =====
+
+async def scheduled_scan(context: ContextTypes.DEFAULT_TYPE):
+    """Scheduled job to scan all parcels."""
+    chat_id = context.job.data.get("chat_id")
+    if not chat_id:
+        return
+
+    async def send_notification(msg):
+        await context.bot.send_message(chat_id=chat_id, text=msg)
+
+    scan_info = await scanner.scan_all(notify_callback=send_notification)
+
+    # Check anomalies
+    anomalies = scanner.check_anomalies()
+    if anomalies:
+        anomaly_msg = format_carrier_anomaly(anomalies, ANOMALY_MIN, ANOMALY_MAX)
+        await context.bot.send_message(chat_id=chat_id, text=anomaly_msg)
+
+    # Only send summary if there are changes
+    if scan_info.get("changed", 0) > 0 or scan_info.get("new", 0) > 0:
+        stats = db.get_summary_stats()
+        msg = format_summary(stats, scan_info)
+        await context.bot.send_message(
+            chat_id=chat_id, text=msg, reply_markup=get_main_menu()
+        )
+
+
+async def cmd_setscan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /setscan — start automated scanning for this chat."""
+    from config import SCAN_INTERVAL_MINUTES
+
+    chat_id = update.effective_chat.id
+
+    # Remove existing jobs for this chat
+    current_jobs = context.job_queue.get_jobs_by_name(f"scan_{chat_id}")
+    for job in current_jobs:
+        job.schedule_removal()
+
+    # Add new scheduled job
+    context.job_queue.run_repeating(
+        scheduled_scan,
+        interval=SCAN_INTERVAL_MINUTES * 60,
+        first=10,  # Start first scan after 10 seconds
+        name=f"scan_{chat_id}",
+        data={"chat_id": chat_id},
+    )
+
+    await update.message.reply_text(
+        f"✅ เปิด Scan อัตโนมัติ ทุกๆ {SCAN_INTERVAL_MINUTES} นาที\n"
+        f"จะแจ้งเตือนเมื่อสถานะพัสดุเปลี่ยน\n\n"
+        f"หยุด Scan: /stopscan"
+    )
+
+
+async def cmd_stopscan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /stopscan — stop automated scanning."""
+    chat_id = update.effective_chat.id
+    current_jobs = context.job_queue.get_jobs_by_name(f"scan_{chat_id}")
+
+    if current_jobs:
+        for job in current_jobs:
+            job.schedule_removal()
+        await update.message.reply_text("⏹️ หยุด Scan อัตโนมัติแล้ว")
+    else:
+        await update.message.reply_text("ℹ️ ยังไม่ได้เปิด Scan อัตโนมัติ")
+
+
+async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle text messages from bottom keyboard buttons."""
+    text = update.message.text.strip()
+
+    if text == "📦 สรุป":
+        stats = db.get_summary_stats()
+        scan_info = scanner.last_scan_info
+        msg = format_summary(stats, scan_info if scan_info else None)
+        await update.message.reply_text(msg, reply_markup=get_main_menu())
+
+    elif text == "🚚 ของมาวันนี้":
+        today_parcels = db.get_today_deliveries()
+        if not today_parcels:
+            await update.message.reply_text(
+                "📦 ของมาวันนี้\n\n"
+                "ยังไม่มีพัสดุที่กำลังจัดส่งวันนี้\n"
+                "💡 ลองกด 🔄 Scan เพื่ออัพเดทสถานะล่าสุด"
+            )
+            return
+        from datetime import date as date_mod
+        today_str = date_mod.today().strftime("%Y-%m-%d")
+        msg = (
+            f"📦 ของมาวันนี้ ({today_str})\n"
+            f"🚚 มีของกำลังจัดส่ง {len(today_parcels)} ชิ้น\n"
+            f"กดปุ่มด้านล่างเพื่อดูรายละเอียด ⬇️"
+        )
+        await update.message.reply_text(msg, reply_markup=get_parcel_buttons(today_parcels))
+
+    elif text == "📋 รายการ":
+        parcels = db.get_active_parcels()
+        if not parcels:
+            await update.message.reply_text("📭 ยังไม่มีพัสดุ")
+            return
+        msg = f"📋 รายการพัสดุ ({len(parcels)} ชิ้น)\nกดปุ่มด้านล่าง ⬇️"
+        await update.message.reply_text(msg, reply_markup=get_parcel_buttons(parcels))
+
+    elif text == "🔄 Scan":
+        await update.message.reply_text("🔄 กำลัง Scan...")
+        chat_id = update.effective_chat.id
+
+        async def send_notification(msg):
+            await context.bot.send_message(chat_id=chat_id, text=msg)
+
+        scan_info = await scanner.scan_all(notify_callback=send_notification)
+
+        anomalies = scanner.check_anomalies()
+        if anomalies:
+            anomaly_msg = format_carrier_anomaly(anomalies, ANOMALY_MIN, ANOMALY_MAX)
+            await context.bot.send_message(chat_id=chat_id, text=anomaly_msg)
+
+        stats = db.get_summary_stats()
+        msg = format_summary(stats, scan_info)
+        await context.bot.send_message(
+            chat_id=chat_id, text=msg, reply_markup=get_main_menu()
+        )
+
+    elif text == "📋 แยกขนส่ง":
+        by_courier = db.get_parcels_by_courier()
+        msg = format_by_courier(by_courier)
+        await update.message.reply_text(msg)
+
+    elif text == "📋 เมนู":
+        await update.message.reply_text(
+            "📋 เมนูหลัก",
+            reply_markup=get_main_menu()
+        )
+
+
+def setup_handlers(app: Application):
+    """Register all handlers to the application."""
+    # Commands
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("menu", cmd_menu))
+    app.add_handler(CommandHandler("add", cmd_add))
+    app.add_handler(CommandHandler("addcarrier", cmd_addcarrier))
+    app.add_handler(CommandHandler("remove", cmd_remove))
+    app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("search", cmd_search))
+    app.add_handler(CommandHandler("setscan", cmd_setscan))
+    app.add_handler(CommandHandler("stopscan", cmd_stopscan))
+
+    # Callback queries (inline keyboard)
+    app.add_handler(CallbackQueryHandler(callback_handler))
+
+    # Text messages (bottom keyboard buttons)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
+
+    logger.info("Bot handlers registered")
