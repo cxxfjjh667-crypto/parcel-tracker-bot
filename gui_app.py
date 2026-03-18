@@ -85,6 +85,15 @@ class ParcelTrackerGUI(ctk.CTk):
         self.entry_et_key.insert(0, os.environ.get("ETRACKINGS_API_KEY", ""))
         self.entry_et_sec.insert(0, os.environ.get("ETRACKINGS_KEY_SECRET", ""))
 
+        # Saved Keys Dropdown
+        ctk.CTkLabel(self.frame_inputs, text="Saved API Keys:").grid(row=3, column=0, padx=10, pady=10, sticky="w")
+        self.key_dropdown = ctk.CTkOptionMenu(self.frame_inputs, values=["No saved keys"], command=self.load_selected_key)
+        self.key_dropdown.grid(row=3, column=1, padx=10, pady=10, sticky="ew")
+
+        # Load saved keys
+        self.saved_keys = []
+        self._load_saved_keys_from_env()
+
         # Save Button
         self.btn_save = ctk.CTkButton(self, text="💾 Save Settings", command=self.save_settings)
         self.btn_save.grid(row=3, column=0, padx=20, pady=10)
@@ -102,6 +111,42 @@ class ParcelTrackerGUI(ctk.CTk):
         
         # Start log updater
         self.update_logs()
+
+    def _load_saved_keys_from_env(self):
+        saved_str = os.environ.get("SAVED_ETRACKINGS_KEYS", "")
+        if saved_str:
+            self.saved_keys = [tuple(k.split(':', 1)) for k in saved_str.split('|') if ':' in k]
+        
+        if self.saved_keys:
+            values = [f"Key {i+1} ({k[0][:8]}...)" for i, k in enumerate(self.saved_keys)]
+            self.key_dropdown.configure(values=values)
+            
+            # Find which one is currently active
+            current_key = os.environ.get("ETRACKINGS_API_KEY", "")
+            for i, k in enumerate(self.saved_keys):
+                if k[0] == current_key:
+                    self.key_dropdown.set(values[i])
+                    break
+            else:
+                self.key_dropdown.set(values[0])
+        else:
+            self.key_dropdown.configure(values=["No saved keys"])
+            self.key_dropdown.set("No saved keys")
+
+    def load_selected_key(self, choice):
+        if choice == "No saved keys" or not self.saved_keys:
+            return
+            
+        try:
+            # Extract index from 'Key X (...)'
+            idx = int(choice.split(' ')[1]) - 1
+            key, sec = self.saved_keys[idx]
+            self.entry_et_key.delete(0, 'end')
+            self.entry_et_key.insert(0, key)
+            self.entry_et_sec.delete(0, 'end')
+            self.entry_et_sec.insert(0, sec)
+        except Exception:
+            pass
 
     def update_logs(self):
         """Consume logs from queue and show in textbox"""
@@ -125,6 +170,17 @@ class ParcelTrackerGUI(ctk.CTk):
         os.environ["TELEGRAM_BOT_TOKEN"] = tg
         os.environ["ETRACKINGS_API_KEY"] = et_key
         os.environ["ETRACKINGS_KEY_SECRET"] = et_sec
+        
+        # Add to saved keys history if it's new
+        if et_key and et_sec:
+            new_pair = (et_key, et_sec)
+            if new_pair not in self.saved_keys:
+                self.saved_keys.append(new_pair)
+                
+            saved_str = "|".join([f"{k}:{s}" for k, s in self.saved_keys])
+            set_key(ENV_PATH, "SAVED_ETRACKINGS_KEYS", saved_str)
+            os.environ["SAVED_ETRACKINGS_KEYS"] = saved_str
+            self._load_saved_keys_from_env()
         
         # If bot is running, update credentials dynamically!
         if self.running:
