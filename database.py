@@ -9,7 +9,8 @@ from datetime import datetime, date
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "tracker.db")
+DATA_DIR = os.environ.get("DATA_DIR", os.path.dirname(__file__))
+DB_PATH = os.path.join(DATA_DIR, "tracker.db")
 
 
 def get_db():
