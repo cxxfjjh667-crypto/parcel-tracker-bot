@@ -272,6 +272,20 @@ def get_today_deliveries() -> list[dict]:
     conn.close()
     return [dict(r) for r in rows]
 
+def get_delivered_today() -> list[dict]:
+    """Get parcels that were delivered today."""
+    today = date.today().isoformat()
+    conn = get_db()
+    rows = conn.execute(
+        """SELECT * FROM parcels
+           WHERE status = 'ON_DELIVERED'
+             AND updated_date LIKE ?
+           ORDER BY updated_date DESC""",
+        (f"{today}%",)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
 
 # Initialize database on import
 init_db()

@@ -14,11 +14,26 @@ class ETrackingsClient:
 
     def __init__(self):
         self.base_url = ETRACKINGS_BASE_URL
+        self.api_key = ETRACKINGS_API_KEY
+        self.key_secret = ETRACKINGS_KEY_SECRET
+        self.call_count = 0
+        self._update_headers()
+
+    def _update_headers(self):
+        """Update headers with current credentials."""
         self.headers = {
-            "Etrackings-Api-Key": ETRACKINGS_API_KEY,
-            "Etrackings-Key-Secret": ETRACKINGS_KEY_SECRET,
+            "Etrackings-Api-Key": self.api_key,
+            "Etrackings-Key-Secret": self.key_secret,
             "Content-Type": "application/json",
         }
+
+    def update_credentials(self, api_key: str, key_secret: str):
+        """Hot-swap API credentials without restarting the bot."""
+        self.api_key = api_key
+        self.key_secret = key_secret
+        self.call_count = 0
+        self._update_headers()
+        logger.info("API credentials updated successfully")
 
     def track(self, tracking_no: str, courier: str) -> dict:
         """
@@ -39,6 +54,7 @@ class ETrackingsClient:
 
         try:
             resp = requests.post(url, headers=self.headers, json=payload, timeout=15)
+            self.call_count += 1
             data = resp.json()
 
             if resp.status_code == 200:

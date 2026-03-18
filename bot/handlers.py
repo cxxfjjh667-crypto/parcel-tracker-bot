@@ -41,14 +41,18 @@ def get_main_menu() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("📋 รายการทั้งหมด", callback_data="all_parcels"),
-            InlineKeyboardButton("📋 แยกขนส่ง", callback_data="by_courier"),
+            InlineKeyboardButton("✅ ส่งสำเร็จวันนี้", callback_data="delivered_today"),
         ],
         [
             InlineKeyboardButton("🔍 ค้นหา", callback_data="search"),
-            InlineKeyboardButton("➕ เพิ่มพัสดุ", callback_data="add"),
+            InlineKeyboardButton("📋 แยกขนส่ง", callback_data="by_courier"),
         ],
         [
             InlineKeyboardButton("🔄 Scan ตอนนี้", callback_data="scan_now"),
+            InlineKeyboardButton("➕ เพิ่มพัสดุ", callback_data="add"),
+        ],
+        [
+            InlineKeyboardButton("📊 API เหลือกี่ครั้ง", callback_data="api_usage"),
             InlineKeyboardButton("📋 เมนู", callback_data="menu"),
         ],
     ]
@@ -59,7 +63,8 @@ def get_bottom_menu() -> ReplyKeyboardMarkup:
     """Create the persistent bottom keyboard."""
     keyboard = [
         [KeyboardButton("📦 สรุป"), KeyboardButton("🚚 ของมาวันนี้"), KeyboardButton("📋 รายการ")],
-        [KeyboardButton("🔄 Scan"), KeyboardButton("📋 แยกขนส่ง"), KeyboardButton("📋 เมนู")],
+        [KeyboardButton("✅ ส่งสำเร็จวันนี้"), KeyboardButton("📋 แยกขนส่ง"), KeyboardButton("📋 เมนู")],
+        [KeyboardButton("🔄 Scan"), KeyboardButton("📊 API")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, is_persistent=True)
 
@@ -277,11 +282,18 @@ def get_parcel_buttons(parcels: list) -> InlineKeyboardMarkup:
         # Row 1: parcel label (shows status)
         keyboard.append([InlineKeyboardButton(label, callback_data=f"s:{tn}")])
         # Row 2: action buttons
-        keyboard.append([
+        row2 = [
             InlineKeyboardButton("📞 เช็คเบอร์", callback_data=f"p:{tn}"),
             InlineKeyboardButton("📜 ประวัติ", callback_data=f"h:{tn}"),
-            InlineKeyboardButton("🗑 ลบ", callback_data=f"d:{tn}"),
-        ])
+        ]
+        
+        row3 = []
+        if p.get("status") == "ON_DELIVERED":
+            row3.append(InlineKeyboardButton("📸 ดูรูปพัสดุ", callback_data=f"img:{tn}"))
+        row3.append(InlineKeyboardButton("🗑 ลบ", callback_data=f"d:{tn}"))
+
+        keyboard.append(row2)
+        keyboard.append(row3)
 
     # Back to menu
     keyboard.append([InlineKeyboardButton("🔙 กลับเมนูหลัก", callback_data="menu")])
@@ -292,10 +304,13 @@ def get_back_buttons(tracking_no: str = None) -> InlineKeyboardMarkup:
     """Back buttons after viewing detail."""
     buttons = []
     if tracking_no:
+        parcel = db.get_parcel(tracking_no)
         buttons.append([
             InlineKeyboardButton("📞 เช็คเบอร์", callback_data=f"p:{tracking_no}"),
             InlineKeyboardButton("📜 ประวัติ", callback_data=f"h:{tracking_no}"),
         ])
+        if parcel and parcel.get("status") == "ON_DELIVERED":
+            buttons.append([InlineKeyboardButton("📸 ดูรูปพัสดุ", callback_data=f"img:{tracking_no}")])
     buttons.append([
         InlineKeyboardButton("📋 รายการทั้งหมด", callback_data="all_parcels"),
         InlineKeyboardButton("🔙 เมนูหลัก", callback_data="menu"),
@@ -356,6 +371,25 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=get_main_menu()
         )
 
+    elif data == "api_usage":
+        count = etrackings.call_count
+        remaining = max(0, 50 - count)
+        if remaining > 20:
+            emoji = "🟢"
+        elif remaining > 5:
+            emoji = "🟡"
+        else:
+            emoji = "🔴"
+        await query.edit_message_text(
+            f"📊 สถานะ API eTrackings\n\n"
+            f"{emoji} ใช้ไปแล้ว: {count}/50 ครั้ง\n"
+            f"📦 เหลือ: {remaining} ครั้ง\n"
+            f"🔑 Key: {etrackings.api_key[:8]}...{etrackings.api_key[-4:]}\n\n"
+            f"💡 ถ้าหมด ให้สมัครใหม่แล้วพิมพ์:\n"
+            f"/setapi <KEY_ใหม่> <SECRET_ใหม่>",
+            reply_markup=get_main_menu()
+        )
+
     elif data == "scan_now":
         await query.edit_message_text("🔄 กำลัง Scan...")
 
@@ -399,6 +433,26 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"กดปุ่มด้านล่างเพื่อดูรายละเอียด ⬇️"
         )
         await query.edit_message_text(msg, reply_markup=get_parcel_buttons(today_parcels))
+
+    # ===== ส่งสำเร็จวันนี้ =====
+    elif data == "delivered_today":
+        delivered_parcels = db.get_delivered_today()
+        if not delivered_parcels:
+            await query.edit_message_text(
+                "✅ ส่งสำเร็จวันนี้\n\n"
+                "ยังไม่มีพัสดุที่ปิดยอดส่งสำเร็จในวันนี้ครับ",
+                reply_markup=get_main_menu()
+            )
+            return
+
+        from datetime import date as date_mod
+        today_str = date_mod.today().strftime("%Y-%m-%d")
+        msg = (
+            f"✅ ส่งสำเร็จวันนี้ ({today_str})\n"
+            f"📦 ปิดยอดส่งแล้ว {len(delivered_parcels)} ชิ้น\n"
+            f"กดปุ่มด้านล่างเพื่อดูรายละเอียดรูปถ่าย ⬇️"
+        )
+        await query.edit_message_text(msg, reply_markup=get_parcel_buttons(delivered_parcels))
 
     # ===== Per-Parcel: เช็คเบอร์ =====
     elif data.startswith("p:"):
@@ -468,6 +522,47 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "\n".join(lines),
             reply_markup=get_back_buttons(tracking_no)
         )
+
+    # ===== Per-Parcel: ดูรูปพัสดุ =====
+    elif data.startswith("img:"):
+        tracking_no = data[4:]
+        parcel = db.get_parcel(tracking_no)
+        if not parcel:
+            await query.edit_message_text(f"❌ ไม่พบ {tracking_no}", reply_markup=get_main_menu())
+            return
+
+        result = etrackings.track(tracking_no, parcel["courier_key"])
+        
+        image_urls = []
+        if result.get("success"):
+            detail = result.get("data", {}).get("detail", {})
+            signer_img = detail.get("signerImageURL", "")
+            if signer_img:
+                # API sometimes returns multiple URLs separated by comma
+                image_urls = [url.strip() for url in signer_img.split(",") if url.strip()]
+        
+        if not image_urls:
+            await query.edit_message_text(
+                f"❌ ไม่พบรูปถ่ายการจัดส่งของ {tracking_no}",
+                reply_markup=get_back_buttons(tracking_no)
+            )
+            return
+            
+        # Send the first image found
+        try:
+            await query.edit_message_text(f"⏳ กำลังโหลดรูปถ่ายสำหรับ {tracking_no} ...")
+            await context.bot.send_photo(
+                chat_id=query.message.chat_id,
+                photo=image_urls[0],
+                caption=f"📸 รูปถ่ายการจัดส่งพัสดุ\n📦 {tracking_no}\n✅ {parcel.get('product_name', '')}",
+                reply_markup=get_back_buttons(tracking_no)
+            )
+        except Exception as e:
+            logger.error(f"Failed to send photo: {e}")
+            await query.edit_message_text(
+                f"❌ โหลดรูปล้มเหลว หรือลิงก์รูปหมดอายุ",
+                reply_markup=get_back_buttons(tracking_no)
+            )
 
     # ===== Per-Parcel: สถานะ (กดที่ชื่อ) =====
     elif data.startswith("s:"):
@@ -635,6 +730,23 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         await update.message.reply_text(msg, reply_markup=get_parcel_buttons(today_parcels))
 
+    elif text == "✅ ส่งสำเร็จวันนี้":
+        delivered_parcels = db.get_delivered_today()
+        if not delivered_parcels:
+            await update.message.reply_text(
+                "✅ ส่งสำเร็จวันนี้\n\n"
+                "ยังไม่มีพัสดุที่ปิดยอดส่งสำเร็จในวันนี้ครับ"
+            )
+            return
+        from datetime import date as date_mod
+        today_str = date_mod.today().strftime("%Y-%m-%d")
+        msg = (
+            f"✅ ส่งสำเร็จวันนี้ ({today_str})\n"
+            f"📦 ปิดยอดส่งแล้ว {len(delivered_parcels)} ชิ้น\n"
+            f"กดปุ่มด้านล่างเพื่อดูรายละเอียดรูปถ่าย ⬇️"
+        )
+        await update.message.reply_text(msg, reply_markup=get_parcel_buttons(delivered_parcels))
+
     elif text == "📋 รายการ":
         parcels = db.get_active_parcels()
         if not parcels:
@@ -674,6 +786,76 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             reply_markup=get_main_menu()
         )
 
+    elif text == "📊 API":
+        count = etrackings.call_count
+        remaining = max(0, 50 - count)
+        if remaining > 20:
+            emoji = "🟢"
+        elif remaining > 5:
+            emoji = "🟡"
+        else:
+            emoji = "🔴"
+        await update.message.reply_text(
+            f"📊 สถานะ API eTrackings\n\n"
+            f"{emoji} ใช้ไปแล้ว: {count}/50 ครั้ง\n"
+            f"📦 เหลือ: {remaining} ครั้ง\n"
+            f"🔑 Key: {etrackings.api_key[:8]}...{etrackings.api_key[-4:]}\n\n"
+            f"💡 ถ้าหมด ให้สมัครใหม่แล้วพิมพ์:\n"
+            f"/setapi <KEY_ใหม่> <SECRET_ใหม่>"
+        )
+
+async def cmd_setapi(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /setapi <api_key> <key_secret> — hot-swap API credentials."""
+    args = context.args
+
+    if not args or len(args) < 2:
+        await update.message.reply_text(
+            "🔑 วิธีเปลี่ยน API Key:\n"
+            "/setapi <API_KEY> <KEY_SECRET>\n\n"
+            "ตัวอย่าง:\n"
+            "/setapi 95ad286b... 1a5e12ed...\n\n"
+            f"📊 ใช้ไปแล้ว: {etrackings.call_count}/50 ครั้ง"
+        )
+        return
+
+    new_api_key = args[0].strip()
+    new_key_secret = args[1].strip()
+
+    # Update the etrackings client (used by handlers)
+    etrackings.update_credentials(new_api_key, new_key_secret)
+
+    # Also update the scanner's client
+    scanner.client.update_credentials(new_api_key, new_key_secret)
+
+    await update.message.reply_text(
+        "✅ เปลี่ยน API Key สำเร็จ!\n\n"
+        f"🔑 Key: {new_api_key[:8]}...{new_api_key[-4:]}\n"
+        f"📊 รีเซ็ตตัวนับ: 0/50 ครั้ง\n\n"
+        "💡 ใช้งานได้เลยทันที ไม่ต้องรีสตาร์ทบอท!"
+    )
+
+
+async def cmd_apiusage(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /apiusage — show current API usage."""
+    count = etrackings.call_count
+    remaining = max(0, 50 - count)
+
+    if remaining > 20:
+        emoji = "🟢"
+    elif remaining > 5:
+        emoji = "🟡"
+    else:
+        emoji = "🔴"
+
+    await update.message.reply_text(
+        f"📊 สถานะ API eTrackings\n\n"
+        f"{emoji} ใช้ไปแล้ว: {count}/50 ครั้ง\n"
+        f"📦 เหลือ: {remaining} ครั้ง\n"
+        f"🔑 Key: {etrackings.api_key[:8]}...{etrackings.api_key[-4:]}\n\n"
+        f"💡 ถ้าหมด ให้สมัครใหม่แล้วพิมพ์:\n"
+        f"/setapi <KEY_ใหม่> <SECRET_ใหม่>"
+    )
+
 
 def setup_handlers(app: Application):
     """Register all handlers to the application."""
@@ -687,6 +869,8 @@ def setup_handlers(app: Application):
     app.add_handler(CommandHandler("search", cmd_search))
     app.add_handler(CommandHandler("setscan", cmd_setscan))
     app.add_handler(CommandHandler("stopscan", cmd_stopscan))
+    app.add_handler(CommandHandler("setapi", cmd_setapi))
+    app.add_handler(CommandHandler("apiusage", cmd_apiusage))
 
     # Callback queries (inline keyboard)
     app.add_handler(CallbackQueryHandler(callback_handler))
