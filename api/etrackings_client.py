@@ -27,6 +27,38 @@ class ETrackingsClient:
             "Content-Type": "application/json",
         }
 
+    def _rotate_key(self):
+        """Switch to the next available API key from environment."""
+        import os
+        saved_str = os.environ.get("SAVED_ETRACKINGS_KEYS", "")
+        keys = [tuple(k.split(':', 1)) for k in saved_str.split('|') if ':' in k]
+        
+        main_key = (self.api_key, self.key_secret)
+        if main_key[0] and main_key not in keys:
+            keys.insert(0, main_key)
+            
+        if not keys or len(keys) <= 1:
+            return False
+            
+        # Find current index and pick next
+        current_idx = -1
+        for i, (k, s) in enumerate(keys):
+            if k == self.api_key:
+                current_idx = i
+                break
+                
+        next_idx = (current_idx + 1) % len(keys)
+        new_k, new_s = keys[next_idx]
+        
+        self.api_key = new_k
+        self.key_secret = new_s
+        self.call_count = 0
+        self._update_headers()
+        
+        import logging
+        logging.getLogger(__name__).warning(f"🔄 โควต้าเต็ม! เปลี่ยน API Key อัตโนมัติเป็น: {new_k[:8]}...")
+        return True
+
     def update_credentials(self, api_key: str, key_secret: str):
         """Hot-swap API credentials without restarting the bot."""
         self.api_key = api_key
@@ -35,7 +67,7 @@ class ETrackingsClient:
         self._update_headers()
         logger.info("API credentials updated successfully")
 
-    def track(self, tracking_no: str, courier: str) -> dict:
+    def track(self, tracking_no: str, courier: str, retry_count=0) -> dict:
         """
         Track a parcel by tracking number and courier.
         
@@ -46,6 +78,12 @@ class ETrackingsClient:
         Returns:
             dict with tracking data or error info
         """
+        # Proactively rotate if we KNOW we hit 50 calls on this object instance
+        if self.call_count >= 50:
+            logger.info("ถึงลิมิตการใช้งาน 50 ครั้งของ Key ปัจจุบันแล้ว กำลังพยายามเปลี่ยน Key...")
+            if not self._rotate_key():
+                logger.warning("ไม่มี API Key สำรองให้เปลี่ยน")
+            
         url = f"{self.base_url}/tracks/find"
         payload = {
             "trackingNo": tracking_no,
@@ -61,9 +99,19 @@ class ETrackingsClient:
                 return {"success": True, "data": data.get("data", {})}
             elif resp.status_code == 404:
                 return {"success": False, "error": "ไม่พบพัสดุนี้ในระบบ"}
-            else:
-                msg = data.get("meta", {}).get("message", f"Error {resp.status_code}")
-                return {"success": False, "error": msg}
+            
+            # Auto-rotate on 429 (Too Many Requests) or specific quota limit errors
+            msg = data.get("meta", {}).get("message", f"Error {resp.status_code}")
+            is_quota_error = resp.status_code in (429, 403, 402) or any(
+                limit_word in msg.lower() for limit_word in ["limit", "exceed", "quota", "package"]
+            )
+            
+            if is_quota_error and retry_count < 1:
+                logger.warning(f"ตรวจพบข้อผิดพลาดโควต้า: {msg}")
+                if self._rotate_key():
+                    return self.track(tracking_no, courier, retry_count=1)
+                
+            return {"success": False, "error": msg}
 
         except requests.exceptions.Timeout:
             logger.error(f"Timeout tracking {tracking_no}")
