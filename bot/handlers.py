@@ -821,17 +821,39 @@ async def cmd_setapi(update: Update, context: ContextTypes.DEFAULT_TYPE):
     new_api_key = args[0].strip()
     new_key_secret = args[1].strip()
 
-    # Update the etrackings client (used by handlers)
+    # 1. Update the etrackings client (in memory)
     etrackings.update_credentials(new_api_key, new_key_secret)
-
-    # Also update the scanner's client
     scanner.client.update_credentials(new_api_key, new_key_secret)
+    
+    # 2. Add to SAVED_ETRACKINGS_KEYS and write to .env so the Server remembers it
+    import os
+    from dotenv import set_key
+    DATA_DIR = os.environ.get("DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
+    env_path = os.path.join(DATA_DIR, ".env")
+    
+    if not os.path.exists(env_path):
+        open(env_path, 'a', encoding="utf-8").close()
+        
+    set_key(env_path, "ETRACKINGS_API_KEY", new_api_key)
+    set_key(env_path, "ETRACKINGS_KEY_SECRET", new_key_secret)
+    os.environ["ETRACKINGS_API_KEY"] = new_api_key
+    os.environ["ETRACKINGS_KEY_SECRET"] = new_key_secret
+    
+    saved_str = os.environ.get("SAVED_ETRACKINGS_KEYS", "")
+    keys = [tuple(k.split(':', 1)) for k in saved_str.split('|') if ':' in k]
+    new_pair = (new_api_key, new_key_secret)
+    if new_pair not in keys:
+        keys.append(new_pair)
+        new_saved_str = "|".join([f"{k}:{s}" for k, s in keys])
+        set_key(env_path, "SAVED_ETRACKINGS_KEYS", new_saved_str)
+        os.environ["SAVED_ETRACKINGS_KEYS"] = new_saved_str
 
     await update.message.reply_text(
-        "✅ เปลี่ยน API Key สำเร็จ!\n\n"
-        f"🔑 Key: {new_api_key[:8]}...{new_api_key[-4:]}\n"
-        f"📊 รีเซ็ตตัวนับ: 0/50 ครั้ง\n\n"
-        "💡 ใช้งานได้เลยทันที ไม่ต้องรีสตาร์ทบอท!"
+        "✅ บันทึก API Key และเพิ่มลงในคิวสำรองเรียบร้อย!\n\n"
+        f"🔑 Key ปัจจุบัน: {new_api_key[:8]}...{new_api_key[-4:]}\n"
+        f"📚 จำนวน Key สำรองในระบบ Server: {len(keys)} ชุด\n"
+        f"📊 รีเซ็ตตัวนับการใช้งาน\n\n"
+        "💡 ต่อจากนี้ถ้าระบบเช็คพัสดุเยอะจนทะลุโควต้า 50 ครั้ง บอทจะพยายามสลับไปใช้ชุดสำรองในคิวให้เองอัตโนมัติ!"
     )
 
 
