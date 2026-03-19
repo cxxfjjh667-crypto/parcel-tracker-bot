@@ -787,20 +787,33 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
 
     elif text == "📊 API":
+        import os
         count = etrackings.call_count
         remaining = max(0, 50 - count)
+        
+        saved_str = os.environ.get("SAVED_ETRACKINGS_KEYS", "")
+        keys = [tuple(k.split(':', 1)) for k in saved_str.split('|') if ':' in k]
+        main_key = (etrackings.api_key, etrackings.key_secret)
+        if main_key[0] and main_key not in keys:
+            keys.insert(0, main_key)
+            
+        total_keys = max(1, len(keys))
+        
         if remaining > 20:
             emoji = "🟢"
         elif remaining > 5:
             emoji = "🟡"
         else:
             emoji = "🔴"
+            
         await update.message.reply_text(
             f"📊 สถานะ API eTrackings\n\n"
-            f"{emoji} ใช้ไปแล้ว: {count}/50 ครั้ง\n"
-            f"📦 เหลือ: {remaining} ครั้ง\n"
-            f"🔑 Key: {etrackings.api_key[:8]}...{etrackings.api_key[-4:]}\n\n"
-            f"💡 ถ้าหมด ให้สมัครใหม่แล้วพิมพ์:\n"
+            f"{emoji} โควต้าชุดปัจจุบัน: ใช้ไป {count}/50 ครั้ง\n"
+            f"📦 ชุดปัจจุบันเหลือ: {remaining} ครั้ง\n"
+            f"🔑 Key ปัจจุบัน: {etrackings.api_key[:8]}...{etrackings.api_key[-4:]}\n\n"
+            f"📚 คลัง API สำรองทั้งหมด: {total_keys} ชุด\n"
+            f"🚀 สแกนต่อเนื่องสูงสุด: {total_keys * 50} พัสดุ/วัน\n\n"
+            f"💡 เติมโควต้าเข้าคลัง พิมพ์คำสั่ง:\n"
             f"/setapi <KEY_ใหม่> <SECRET_ใหม่>"
         )
 
@@ -859,8 +872,17 @@ async def cmd_setapi(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_apiusage(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /apiusage — show current API usage."""
+    import os
     count = etrackings.call_count
     remaining = max(0, 50 - count)
+    
+    saved_str = os.environ.get("SAVED_ETRACKINGS_KEYS", "")
+    keys = [tuple(k.split(':', 1)) for k in saved_str.split('|') if ':' in k]
+    main_key = (etrackings.api_key, etrackings.key_secret)
+    if main_key[0] and main_key not in keys:
+        keys.insert(0, main_key)
+        
+    total_keys = max(1, len(keys))
 
     if remaining > 20:
         emoji = "🟢"
@@ -871,10 +893,12 @@ async def cmd_apiusage(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         f"📊 สถานะ API eTrackings\n\n"
-        f"{emoji} ใช้ไปแล้ว: {count}/50 ครั้ง\n"
-        f"📦 เหลือ: {remaining} ครั้ง\n"
-        f"🔑 Key: {etrackings.api_key[:8]}...{etrackings.api_key[-4:]}\n\n"
-        f"💡 ถ้าหมด ให้สมัครใหม่แล้วพิมพ์:\n"
+        f"{emoji} โควต้าชุดปัจจุบัน: ใช้ไป {count}/50 ครั้ง\n"
+        f"📦 ชุดปัจจุบันเหลือ: {remaining} ครั้ง\n"
+        f"🔑 Key ปัจจุบัน: {etrackings.api_key[:8]}...{etrackings.api_key[-4:]}\n\n"
+        f"📚 คลัง API สำรองทั้งหมด: {total_keys} ชุด\n"
+        f"🚀 สแกนต่อเนื่องสูงสุด: {total_keys * 50} พัสดุ/วัน\n\n"
+        f"💡 เติมโควต้าเข้าคลัง พิมพ์คำสั่ง:\n"
         f"/setapi <KEY_ใหม่> <SECRET_ใหม่>"
     )
 
