@@ -827,6 +827,9 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"/setapi <KEY_ใหม่> <SECRET_ใหม่>"
         )
 
+    elif text == "🎲 สุ่มที่อยู่":
+        await send_random_address(update.message)
+
 async def cmd_setapi(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /setapi <api_key> <key_secret> — hot-swap API credentials."""
     args = context.args
