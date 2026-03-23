@@ -53,8 +53,11 @@ def get_main_menu() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("📊 API เหลือกี่ครั้ง", callback_data="api_usage"),
-            InlineKeyboardButton("📋 เมนู", callback_data="menu"),
+            InlineKeyboardButton("🎲 สุ่มที่อยู่", callback_data="random_addr"),
         ],
+        [
+            InlineKeyboardButton("📋 เมนู", callback_data="menu"),
+        ]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -64,7 +67,7 @@ def get_bottom_menu() -> ReplyKeyboardMarkup:
     keyboard = [
         [KeyboardButton("📦 สรุป"), KeyboardButton("🚚 ของมาวันนี้"), KeyboardButton("📋 รายการ")],
         [KeyboardButton("✅ ส่งสำเร็จวันนี้"), KeyboardButton("📋 แยกขนส่ง"), KeyboardButton("📋 เมนู")],
-        [KeyboardButton("🔄 Scan"), KeyboardButton("📊 API")]
+        [KeyboardButton("🔄 Scan"), KeyboardButton("📊 API"), KeyboardButton("🎲 สุ่มที่อยู่")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, is_persistent=True)
 
@@ -600,6 +603,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"❌ ไม่พบ {tracking_no}",
                 reply_markup=get_main_menu()
             )
+
+    # ===== สุ่มที่อยู่ =====
+    elif data == "random_addr":
+        await send_random_address(query.message)
+        
+    else:
+        await query.answer()
 
 
 async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
