@@ -913,6 +913,82 @@ async def cmd_apiusage(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def send_random_address(message):
+    import os
+    import random
+    import string
+    
+    part1 = os.environ.get("RANDOM_ADDR_P1", "กะลุวอ")
+    part2 = os.environ.get("RANDOM_ADDR_P2", "อ.เมือง จ.นราธิวาส 96000")
+    
+    def rand_str(length):
+        return ''.join(random.choices(string.ascii_lowercase, k=length))
+    
+    def rand_symbols(length):
+        symbols = "{?_+(฿^$.'"
+        return ''.join(random.choices(symbols, k=length))
+        
+    s1 = rand_str(random.randint(7, 10))
+    h1 = random.randint(1, 999)
+    h2 = random.randint(1, 999)
+    s2 = rand_str(random.randint(6, 10))
+    s3 = rand_str(random.randint(6, 10))
+    
+    sym1 = rand_symbols(random.randint(3, 5))
+    sym2 = rand_symbols(random.randint(3, 5))
+    
+    # 10 digit phone number starting with '08', '09', '06'
+    prefix = random.choice(['08', '09', '06'])
+    phone = prefix + ''.join([str(random.randint(0, 9)) for _ in range(8)])
+    
+    address = f"{s1} {h1}/{h2} {s2} {s3} {sym1}{part1}{sym2} {part2}"
+    result = f"`{address}`\n\nเบอร์: `{phone}`"
+    
+    await message.reply_markdown(
+        f"🎲 **สุ่มที่อยู่จัดส่งใหม่แล้ว:**\n\n"
+        f"{result}\n\n"
+        f"💡 (แตะที่ข้อความเพื่อก๊อปปี้ได้เลย)\n"
+        f"⚙️ เปลี่ยนตำบล/จังหวัด พิมพ์:\n"
+        f"`/setaddress <ตำบล> | <อำเภอ จังหวัด รหัสไปรษณีย์>`"
+    )
+
+async def cmd_setaddress(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /setaddress <part1> | <part2>."""
+    text = " ".join(context.args)
+    if "|" not in text:
+        await update.message.reply_markdown(
+            "❌ รูปแบบผิด!\n\n"
+            "วิธีตั้งค่าที่อยู่คงที่สำหรับสุ่ม:\n"
+            "`/setaddress ตำบล | อำเภอ จังหวัด รหัสไปรษณีย์`\n\n"
+            "ตัวอย่าง:\n"
+            "`/setaddress กะลุวอ | อ.เมือง จ.นราธิวาส 96000`"
+        )
+        return
+        
+    part1, part2 = text.split("|", 1)
+    part1 = part1.strip()
+    part2 = part2.strip()
+    
+    import os
+    from dotenv import set_key
+    DATA_DIR = os.environ.get("DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
+    env_path = os.path.join(DATA_DIR, ".env")
+    
+    if not os.path.exists(env_path):
+        open(env_path, 'a', encoding="utf-8").close()
+        
+    set_key(env_path, "RANDOM_ADDR_P1", part1)
+    set_key(env_path, "RANDOM_ADDR_P2", part2)
+    os.environ["RANDOM_ADDR_P1"] = part1
+    os.environ["RANDOM_ADDR_P2"] = part2
+    
+    await update.message.reply_text(
+        f"✅ บันทึกที่อยู่ตั้งต้นสำเร็จ!\n\n"
+        f"ส่วนที่ 1: {part1}\n"
+        f"ส่วนที่ 2: {part2}\n\n"
+        f"ลองกดปุ่ม 🎲 สุ่มที่อยู่ ดูได้เลยครับ"
+    )
+
 def setup_handlers(app: Application):
     """Register all handlers to the application."""
     # Commands
@@ -927,6 +1003,7 @@ def setup_handlers(app: Application):
     app.add_handler(CommandHandler("stopscan", cmd_stopscan))
     app.add_handler(CommandHandler("setapi", cmd_setapi))
     app.add_handler(CommandHandler("apiusage", cmd_apiusage))
+    app.add_handler(CommandHandler("setaddress", cmd_setaddress))
 
     # Callback queries (inline keyboard)
     app.add_handler(CallbackQueryHandler(callback_handler))
